@@ -26,15 +26,25 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 # -----------------------------------------------------------------------------
 
-# Automator/Quick Actions run with a minimal PATH, so add the Homebrew bins
-# for both Apple Silicon (/opt/homebrew) and Intel (/usr/local), plus
-# ~/.local/bin where the claude CLI lives.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
-
-notify() {
-  # notify "Title line" "message"
-  osascript -e "display notification \"$2\" with title \"Kobo Send\" subtitle \"$1\"" >/dev/null 2>&1 || true
-}
+# Runs both on macOS (via Automator/Quick Actions, which use a minimal PATH)
+# and on Linux (headless, via the webhook service) — set PATH and notify()
+# for whichever this is.
+if [[ "$(uname)" == "Darwin" ]]; then
+  # Homebrew bins for both Apple Silicon (/opt/homebrew) and Intel
+  # (/usr/local), plus ~/.local/bin where the claude CLI lives.
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bin:$PATH"
+  notify() {
+    # notify "Title line" "message"
+    osascript -e "display notification \"$2\" with title \"Kobo Send\" subtitle \"$1\"" >/dev/null 2>&1 || true
+  }
+else
+  export PATH="$HOME/.local/bin:$HOME/.bin:$PATH"
+  notify() {
+    # notify "Title line" "message" — no GUI on a headless server, so just log.
+    logger -t kobo-send "$1: $2" 2>/dev/null || true
+    echo "$1: $2" >&2
+  }
+fi
 
 # Verify tools exist up front with a clear message rather than a cryptic failure.
 for tool in pandoc kepubify rclone claude; do
@@ -97,7 +107,22 @@ for INPUT in "$@"; do
       failed=$((failed+1))
       continue
     fi
-    STEM="$(grep -m1 '^# ' "$MD" | sed 's/^# *//' | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+    # claude sometimes refuses (e.g. over copyright concerns) and writes a
+    # short refusal sentence to $MD instead of erroring out — a real article
+    # is always far longer than that, so treat suspiciously short output as
+    # a failure rather than converting the refusal itself into a "book".
+    if [ "$(wc -c < "$MD")" -lt 300 ]; then
+      notify "Fetch failed" "claude declined or found no article at $INPUT"
+      failed=$((failed+1))
+      continue
+    fi
+    # claude's WebFetch output doesn't reliably start with an exact "# Title"
+    # heading, so take the first non-blank line and strip whatever markdown
+    # decoration it has (#, *, _) rather than requiring that exact format.
+    # The `|| true` matters: under set -e, grep finding no non-blank line at
+    # all would otherwise kill the whole script instead of falling through to
+    # the STEM="webpage" default below.
+    STEM="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//' | tr -c '[:alnum:] ._-' '_' | cut -c1-80)" || true
     [ -z "$STEM" ] && STEM="webpage"
     EPUB="$WORKDIR/$STEM.epub"
     if ! pandoc "$MD" -o "$EPUB" --metadata title="$STEM" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
@@ -108,8 +133,12 @@ for INPUT in "$@"; do
     EXT_LC=""
   else
     BASENAME="$(basename "$INPUT")"
-    STEM="${BASENAME%.*}"
     EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
+    # Sanitize like the URL branch does — an input filename can come from
+    # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
+    # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
+    STEM="$(printf '%s' "${BASENAME%.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+    [ -z "$STEM" ] && STEM="file"
     EPUB="$WORKDIR/$STEM.epub"
   fi
 
@@ -129,6 +158,12 @@ for INPUT in "$@"; do
       fi
       if [ ! -s "$MD" ]; then
         notify "Conversion failed" "claude produced no content for $BASENAME"
+        failed=$((failed+1))
+        continue
+      fi
+      # Same refusal-guard as the URL branch — see comment there.
+      if [ "$(wc -c < "$MD")" -lt 300 ]; then
+        notify "Conversion failed" "claude declined or found no content in $BASENAME"
         failed=$((failed+1))
         continue
       fi

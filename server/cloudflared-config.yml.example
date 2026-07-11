@@ -1,0 +1,9 @@
+# Copy to ~/.cloudflared/config.yml on the server and fill in your own
+# tunnel ID (from `cloudflared tunnel create kobo-send`) and hostname.
+tunnel: YOUR-TUNNEL-ID
+credentials-file: /home/YOUR-USER/.cloudflared/YOUR-TUNNEL-ID.json
+
+ingress:
+  - hostname: kobo.yourdomain.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404

@@ -1,0 +1,10 @@
+[Unit]
+Description=kobo-send webhook
+
+[Service]
+ExecStart=/home/giacecco/.bun/bin/bun run %h/.bin/kobo-webhook.ts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

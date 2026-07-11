@@ -59,7 +59,7 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>"$HOME/.bin/kobo-send.sh" "$@"</string>
+					<string>"$HOME/.bin/kobo-send-client.sh" "$@"</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
