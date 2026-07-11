@@ -1,0 +1,6 @@
+# Copy this file to ~/.config/kobo-send/config and fill in your own values.
+# That file is untracked and machine-specific — never commit real values.
+
+GDRIVE_REMOTE="kobocloud"       # the rclone remote name you configured
+GDRIVE_FOLDER_ID=""             # the Google Drive folder ID KoboCloud watches
+PURGE_OLDER_THAN="3d"           # age at which old sends are purged from Drive

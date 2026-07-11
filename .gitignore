@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# personal working notes (contains real Drive folder ID)
+kobo-send-handoff.md
