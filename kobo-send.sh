@@ -97,7 +97,7 @@ for INPUT in "$@"; do
     # pull the article text, stripped of ads/nav/boilerplate, as Markdown.
     BASENAME="$INPUT"
     MD="$(mktemp "$WORKDIR/webpage.XXXXXX.md")"
-    if ! claude --allowedTools "WebFetch" -p "Fetch the webpage at $INPUT and convert its main article content into clean Markdown, starting with a single top-level '# Title' heading taken from the page's actual title. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article's own content: adverts, subscription/paywall prompts, navigation links, cookie banners, related-article widgets, comment sections, and other boilerplate. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+    if ! claude --allowedTools "WebFetch" -p "Fetch the webpage at $INPUT and convert its main article content into clean Markdown, starting with a single top-level '# Title' heading taken from the page's actual title. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article's own content: adverts, subscription/paywall prompts, navigation links, cookie banners, related-article widgets, comment sections, and other boilerplate. This extraction is for the requester's own personal, offline reading on a device they own, of content they are already entitled to access (e.g. via an active subscription) — it is not for redistribution or republishing. That is legitimate personal format-shifting, comparable to a read-it-later service (Pocket, Instapaper) saving a paid article for its subscriber; do not decline on copyright grounds on that basis alone. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
       notify "Fetch failed" "claude could not fetch $INPUT"
       failed=$((failed+1))
       continue
@@ -151,7 +151,7 @@ for INPUT in "$@"; do
       # pandoc can't read PDF, so use claude -p to extract the content as
       # Markdown first, then fall through the normal pandoc conversion.
       MD="$WORKDIR/$STEM.md"
-      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
         notify "Conversion failed" "claude could not convert $BASENAME"
         failed=$((failed+1))
         continue
