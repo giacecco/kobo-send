@@ -80,6 +80,7 @@ sent=0
 failed=0
 
 for INPUT in "$@"; do
+  KEPUB=""
   if [[ "$INPUT" =~ ^https?:// ]]; then
     IS_URL=1
   else
@@ -133,11 +134,19 @@ for INPUT in "$@"; do
     EXT_LC=""
   else
     BASENAME="$(basename "$INPUT")"
-    EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
-    # Sanitize like the URL branch does — an input filename can come from
-    # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
-    # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
-    STEM="$(printf '%s' "${BASENAME%.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+    # A .kepub.epub is already in its final form — and kepubify rejects it
+    # outright ('invalid extension ".kepub.epub"') — so it must bypass both
+    # conversion steps, not be fed back through them.
+    if [[ "$(printf '%s' "$BASENAME" | tr '[:upper:]' '[:lower:]')" == *.kepub.epub ]]; then
+      EXT_LC="kepub.epub"
+      STEM="$(printf '%s' "${BASENAME%.*.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+    else
+      EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
+      # Sanitize like the URL branch does — an input filename can come from
+      # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
+      # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
+      STEM="$(printf '%s' "${BASENAME%.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+    fi
     [ -z "$STEM" ] && STEM="file"
     EPUB="$WORKDIR/$STEM.epub"
   fi
@@ -176,6 +185,12 @@ for INPUT in "$@"; do
     epub)
       cp "$INPUT" "$EPUB"
       ;;
+    kepub.epub)
+      # Already converted — nothing for pandoc or kepubify to do; setting
+      # KEPUB here makes Step 2 skip itself and go straight to the upload.
+      KEPUB="$WORKDIR/$STEM.kepub.epub"
+      cp "$INPUT" "$KEPUB"
+      ;;
     md|markdown|txt|html|htm|docx|rtf|fb2|org|tex|rst)
       # --metadata title gives the book a sensible title on the Kobo shelf;
       # --epub-title-page=false skips the standalone title-only front page.
@@ -193,19 +208,22 @@ for INPUT in "$@"; do
   esac
 
   # --- Step 2: epub -> kepub ----------------------------------------------
+  # Skipped when the input was already a .kepub.epub (KEPUB set above).
   # kepubify -o DIR writes <stem>[_converted].kepub.epub into DIR (the exact
   # suffix has varied across kepubify versions), so glob for it rather than
   # hardcoding the name.
-  if ! kepubify --no-add-dummy-titlepage -o "$WORKDIR" "$EPUB" >/dev/null 2>&1; then
-    notify "Conversion failed" "kepubify failed on $BASENAME"
-    failed=$((failed+1))
-    continue
-  fi
-  KEPUB="$(find "$WORKDIR" -maxdepth 1 -name "${STEM}*.kepub.epub" -print -quit)"
-  if [ -z "$KEPUB" ] || [ ! -f "$KEPUB" ]; then
-    notify "Conversion failed" "no kepub produced for $BASENAME"
-    failed=$((failed+1))
-    continue
+  if [ -z "$KEPUB" ]; then
+    if ! kepubify --no-add-dummy-titlepage -o "$WORKDIR" "$EPUB" >/dev/null 2>&1; then
+      notify "Conversion failed" "kepubify failed on $BASENAME"
+      failed=$((failed+1))
+      continue
+    fi
+    KEPUB="$(find "$WORKDIR" -maxdepth 1 -name "${STEM}*.kepub.epub" -print -quit)"
+    if [ -z "$KEPUB" ] || [ ! -f "$KEPUB" ]; then
+      notify "Conversion failed" "no kepub produced for $BASENAME"
+      failed=$((failed+1))
+      continue
+    fi
   fi
 
   # --- Step 3: upload to the Google Drive folder ---------------------------
