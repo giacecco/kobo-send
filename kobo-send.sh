@@ -160,7 +160,7 @@ for INPUT in "$@"; do
       # pandoc can't read PDF, so use claude -p to extract the content as
       # Markdown first, then fall through the normal pandoc conversion.
       MD="$WORKDIR/$STEM.md"
-      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading taken from the document's actual title (not its filename). Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
         notify "Conversion failed" "claude could not convert $BASENAME"
         failed=$((failed+1))
         continue
@@ -176,6 +176,15 @@ for INPUT in "$@"; do
         failed=$((failed+1))
         continue
       fi
+      # Prefer the document's own title over the input filename — PDFs
+      # exported by an app (e.g. macOS's generic "PDF document.pdf" from
+      # Safari's Print > Save as PDF) often carry no meaningful filename at
+      # all. Same first-non-blank-line extraction as the URL branch, falling
+      # back to the filename-derived STEM already set above if extraction
+      # yields nothing.
+      PDF_TITLE_STEM="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//' | tr -c '[:alnum:] ._-' '_' | cut -c1-80)" || true
+      [ -n "$PDF_TITLE_STEM" ] && STEM="$PDF_TITLE_STEM"
+      EPUB="$WORKDIR/$STEM.epub"
       if ! pandoc "$MD" -o "$EPUB" --metadata title="$STEM" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
         notify "Conversion failed" "pandoc could not convert $BASENAME"
         failed=$((failed+1))
