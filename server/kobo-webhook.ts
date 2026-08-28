@@ -12,6 +12,13 @@ const TOKEN_FILE = join(process.env.HOME!, ".config/kobo-send/webhook-token");
 const SCRIPT = join(process.env.HOME!, ".bin/kobo-send.sh");
 const TOKEN = (await Bun.file(TOKEN_FILE).text()).trim();
 
+// Some Share Sheet sources (notably a Shortcut coercing a Safari web-page
+// item to text) hand over a URL with the whole thing duplicated across a
+// literal embedded newline, rather than just leading/trailing whitespace —
+// .trim() alone doesn't catch that, so validate shape after taking the
+// first line.
+const URL_RE = /^https?:\/\/\S+$/;
+
 function timingSafeEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a);
   const bufB = Buffer.from(b);
@@ -53,9 +60,9 @@ Bun.serve({
 
     if (contentType.startsWith("application/json")) {
       const data = (await req.json().catch(() => ({}))) as { url?: string };
-      const url = (data.url ?? "").trim();
-      if (!url) {
-        return new Response(JSON.stringify({ error: "missing url" }), { status: 400 });
+      const url = (data.url ?? "").split(/\r?\n/)[0].trim();
+      if (!url || !URL_RE.test(url)) {
+        return new Response(JSON.stringify({ error: "missing or malformed url" }), { status: 400 });
       }
       runInBackground(url);
       return new Response(JSON.stringify({ status: "queued", target: url }), { status: 202 });
@@ -73,7 +80,6 @@ Bun.serve({
       // whose name — or whose entire content — is just the URL text. Detect
       // that and route it through the real URL pipeline (title extraction,
       // refusal-guard) instead of uploading a book named after a raw link.
-      const URL_RE = /^https?:\/\/\S+$/;
       let url: string | null = URL_RE.test(file.name) ? file.name : null;
       if (!url && file.size < 2048) {
         const text = (await file.text()).trim();
