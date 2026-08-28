@@ -1,6 +1,6 @@
 # kobo-send
 
-Send a file — or a web page URL — straight to a Kobo Clara 2E from macOS or iOS, via a Finder Quick Action, Safari's Share menu, or an iOS Shortcut. No cable required.
+Send a file — or a web page URL — straight to a Kobo Clara 2E from macOS or iOS, via a macOS Shortcut (Finder's Share menu or Safari's Share menu) or an iOS Shortcut. No cable required.
 
 ## How it works
 
@@ -9,7 +9,7 @@ The Kobo has no native cloud sync, but [KoboCloud](https://github.com/fsantini/K
 The actual conversion pipeline runs on an always-on Linux server, reachable over a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) — the Mac and any iPhone just post a file or URL to it and don't need any of the pipeline's dependencies installed locally:
 
 ```
-Mac Quick Action ─┐
+Mac Shortcut ──────┐
 iOS Shortcut ──────┼──> kobo-webhook (Bun/TS) ──> kobo-send.sh:
 Safari Share ──────┘      on the server            input --(pandoc)--> epub --(kepubify)--> .kepub.epub --(rclone)--> Google Drive folder
 ```
@@ -66,13 +66,11 @@ curl -fsSL https://bun.sh/install | bash                           # installs bu
 
 1. Copy the webhook token to `~/.config/kobo-send/webhook-token` (`chmod 600`) — same value as the server's.
 2. Install `kobo-send-client.sh` to `~/.bin/kobo-send-client.sh` (`chmod +x`), with `WEBHOOK_URL` in it pointed at your tunnel hostname.
-3. Set up the Finder Quick Action (see `automator/`) so it calls `~/.bin/kobo-send-client.sh`.
-4. In System Settings → General → Login Items & Extensions, enable the new Quick Action — it's often off by default.
-5. For sending page URLs from Safari, build a Shortcut (macOS dropped support for Automator's legacy `NSServices` in Safari's Share/Services menus — see Known limitations):
-   - Shortcuts app → New Shortcut, name it **Send Page to Kobo**.
-   - Add a **Run Shell Script** action: Shell `/bin/bash`, Input **as arguments**, script `"$HOME/.bin/kobo-send-client.sh" "$1"`.
-   - In the shortcut's settings (ⓘ), enable **Use as Quick Action → Share Sheet**, and restrict accepted types to **URLs**.
-   - In Safari, it'll now appear under the Share button → **Send Page to Kobo**.
+3. One-time: Shortcuts app → Settings… → Advanced → enable **Allow Running Scripts** (required for the `Run Shell Script` action used below).
+4. Build two Shortcuts (both call `kobo-send-client.sh` directly, so there's no JSON body to hand-build and no Automator `NSServices` involved — see Known limitations for why that route was retired):
+   - **Send to Kobo** (files): New Shortcut → add **Run Shell Script** (Shell `/bin/zsh`, Input **Shortcut Input**, Pass Input **as arguments**), script `"$HOME/.bin/kobo-send-client.sh" "$1"`. In the shortcut's settings (ⓘ), enable **Use as Quick Action → Share Sheet**, restrict accepted types to **Files**.
+   - **Send Page to Kobo** (URLs): same, but restrict accepted types to **URLs**.
+5. It'll now show up under **right-click → Share → Shortcuts** in Finder (files) and under Safari's Share button (pages).
 
 ### iPhone
 
@@ -82,9 +80,9 @@ Build two Shortcuts (Share Sheet-enabled) that `POST` to `https://kobo.yourdomai
 
 ## Usage
 
-From Finder, right-click one or more files → Quick Actions → **Send to Kobo**.
+From Finder, right-click a file → Share → Shortcuts → **Send to Kobo**.
 
-From Safari, use Share → **Send Page to Kobo** (macOS Shortcut) to send the current page.
+From Safari, use Share → **Send Page to Kobo** to send the current page.
 
 From an iPhone, use the Share sheet → **Send Page to Kobo** / **Send File to Kobo**.
 
@@ -97,7 +95,7 @@ kobo-send-client.sh https://example.com/some-article
 
 ## Known limitations
 
-- Safari no longer surfaces legacy Automator Services (`NSServices`) for whole-page actions on modern macOS — this broke the original "Send Page to Kobo" Safari Service some time after it was first set up, with no error or deprecation notice. A macOS Shortcut (Share Sheet) replaces it; see Setup → Mac.
+- Modern macOS no longer reliably runs legacy Automator Services (`NSServices`) for either Safari's whole-page actions or Finder's file actions — both the original "Send Page to Kobo" Safari Service and the "Send to Kobo" Finder Quick Action stopped working some time after they were first set up, with no error or deprecation notice (the Finder one loaded and even ran per macOS's own process logs, but silently never executed its embedded shell script). Both are replaced by Shortcuts-app Shortcuts (Share Sheet) instead; see Setup → Mac.
 - PDF and web-page conversion quality depends on `claude -p`'s extraction — it's generally good for article-shaped content, less reliable for complex multi-column layouts, heavily scripted pages, or sites requiring a login (e.g. LinkedIn) — `claude -p` doesn't emulate a real browser session, so auth-gated content often can't be fetched at all.
 - The Drive-folder purge is time-based, not sync-confirmed — set `PURGE_OLDER_THAN` generously if your Kobo doesn't connect to WiFi often.
 - Since the webhook responds before the job finishes, the Mac/iPhone confirmation only means "queued," not "done" — check the Drive folder (or the server's `journalctl --user -u kobo-webhook.service`) if a send seems to have gone missing.
