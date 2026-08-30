@@ -150,8 +150,7 @@ for INPUT in "$@"; do
   case "$EXT_LC" in
     pdf)
       # --- Step 1a: determine title/author from a small, cheap excerpt ---
-      # A dedicated, narrowly-scoped call, always on sonnet (not laddered
-      # like the content call below): a wrong-but-plausible title/author
+      # A dedicated, narrowly-scoped call: a wrong-but-plausible title/author
       # would sail straight past every guard downstream (they only catch
       # refusals/emptiness, not inaccuracy) — confirmed in testing, where
       # haiku picked a subheading ("The Path to a Positive AI Future")
@@ -167,16 +166,36 @@ for INPUT in "$@"; do
       META_TITLE="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Title:[[:space:]]+//p')" || true
       META_AUTHOR="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Author:[[:space:]]+//p')" || true
       PAGE1_SNIPPET="$(pdftotext -f 1 -l 1 -layout "$INPUT" - 2>/dev/null | head -n 20)" || true
-      TITLE_AUTHOR_RAW="$(claude --model sonnet -p "Here is the top of page 1 of a PDF document, extracted as plain text (layout may be imperfect, and it may include site navigation/boilerplate above the actual article start):
+      # This call has no downstream guard at all — an empty/malformed reply
+      # just silently degrades to "no author" (or a filename-derived title)
+      # with nothing in the log to show it happened. Confirmed happening in
+      # practice: a real send correctly found "Sam Altman" in the filename
+      # on a direct reproduction, immediately after the live send had
+      # somehow missed it — a one-shot flake, not a design flaw. Ladder
+      # sonnet → opus (2 attempts) so a single flake here doesn't silently
+      # cost the file its author/title, same rationale as the content call.
+      TITLE_AUTHOR_OK=0
+      for ta_attempt in 1 2; do
+        if [ "$ta_attempt" -eq 1 ]; then TA_MODEL="sonnet"; else TA_MODEL="opus"; fi
+        TITLE_AUTHOR_RAW="$(claude --model "$TA_MODEL" -p "Here is the top of page 1 of a PDF document, extracted as plain text (layout may be imperfect, and it may include site navigation/boilerplate above the actual article start):
 ---
 $PAGE1_SNIPPET
 ---
 Using this excerpt as the primary source, and — only if the excerpt doesn't clearly show one — this PDF's own embedded metadata (title=\"$META_TITLE\", author=\"$META_AUTHOR\") and its filename (\"$BASENAME\", only useful if it clearly encodes a real title or a full author name, not if generic/app-generated like 'PDF document.pdf' or 'Scan001.pdf'), determine: (1) the document's real title — not a subheading or section title; if the excerpt shows a document title followed by a different subheading below it, prefer the document title — and (2) if identifiable, the author's full name (first and last, not just a first name or an informal sign-off). Never invent a title or author not supported by one of these three sources. Respond in exactly two lines and nothing else: 'TITLE: <title, or NONE if truly unclear>' then 'AUTHOR: <full name, or NONE if not a clear full name>'." 2>/dev/null)" || true
-      TITLE_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^TITLE:[[:space:]]+//p')" || true
-      [ "$TITLE_FINAL" = "NONE" ] && TITLE_FINAL=""
-      AUTHOR_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^AUTHOR:[[:space:]]+//p')" || true
-      [ "$AUTHOR_FINAL" = "NONE" ] && AUTHOR_FINAL=""
-      [ "$(printf '%s' "$AUTHOR_FINAL" | wc -w)" -lt 2 ] && AUTHOR_FINAL=""
+        if printf '%s\n' "$TITLE_AUTHOR_RAW" | grep -q '^TITLE:'; then
+          TITLE_AUTHOR_OK=1
+          break
+        fi
+      done
+      TITLE_FINAL=""
+      AUTHOR_FINAL=""
+      if [ "$TITLE_AUTHOR_OK" -eq 1 ]; then
+        TITLE_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^TITLE:[[:space:]]+//p')" || true
+        [ "$TITLE_FINAL" = "NONE" ] && TITLE_FINAL=""
+        AUTHOR_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^AUTHOR:[[:space:]]+//p')" || true
+        [ "$AUTHOR_FINAL" = "NONE" ] && AUTHOR_FINAL=""
+        [ "$(printf '%s' "$AUTHOR_FINAL" | wc -w)" -lt 2 ] && AUTHOR_FINAL=""
+      fi
       # Falls through to the filename-derived TITLE/STEM set earlier if the
       # call above yielded nothing at all.
       if [ -n "$TITLE_FINAL" ]; then
