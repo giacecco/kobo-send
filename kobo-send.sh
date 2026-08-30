@@ -24,6 +24,17 @@ if [ -f "$CONFIG_FILE" ]; then
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
 fi
+
+# claude -p (PDF/URL conversion) authenticates via an API key rather than an
+# interactive OAuth login — the OAuth session expired once already and
+# silently broke every conversion until manually re-run through `claude
+# login`. An API key doesn't expire the same way. Billed separately, at
+# Anthropic API rates, from any Claude subscription.
+ANTHROPIC_KEY_FILE="$HOME/.config/kobo-send/anthropic-api-key"
+if [ -f "$ANTHROPIC_KEY_FILE" ]; then
+  ANTHROPIC_API_KEY="$(cat "$ANTHROPIC_KEY_FILE")"
+  export ANTHROPIC_API_KEY
+fi
 # -----------------------------------------------------------------------------
 
 # Runs both on macOS (via Automator/Quick Actions, which use a minimal PATH)

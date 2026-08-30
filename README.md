@@ -37,7 +37,7 @@ chmod +x ~/.bin/kepubify ~/.bin/cloudflared
 curl -fsSL https://bun.sh/install | bash                           # installs bun
 ```
 (kepubify/cloudflared have no macOS builds referenced above — swap in the `-darwin` release asset if your server is a Mac instead of Linux.)
-- [Claude Code](https://claude.com/claude-code) CLI (`claude`) — used only for PDF and URL conversion
+- [Claude Code](https://claude.com/claude-code) CLI (`claude`) — used only for PDF and URL conversion. Authenticates via an [Anthropic API key](https://console.anthropic.com) rather than `claude login`'s OAuth session, which billed usage differently and used to expire silently. Save it to `~/.config/kobo-send/anthropic-api-key` (`chmod 600`) — `kobo-send.sh` picks it up automatically if present. Billed at Anthropic API rates, separate from any Claude subscription.
 - A domain on Cloudflare DNS, for a tunnel hostname (e.g. `kobo.yourdomain.com`)
 - A KoboCloud installation on the Kobo, watching a Google Drive folder (see KoboCloud's own docs for that setup)
 - An rclone remote configured for that Google Drive folder: `rclone config`
@@ -52,10 +52,11 @@ curl -fsSL https://bun.sh/install | bash                           # installs bu
 2. Copy `kobo-send.conf.example` to `~/.config/kobo-send/config` and fill in your rclone remote name and Drive folder ID.
 3. Install `kobo-send.sh` to `~/.bin/kobo-send.sh` (`chmod +x`).
 4. Generate a bearer token and save it: `openssl rand -hex 32 > ~/.config/kobo-send/webhook-token && chmod 600 ~/.config/kobo-send/webhook-token`
-5. Install `server/kobo-webhook.ts` to `~/.bin/kobo-webhook.ts`.
-6. `cloudflared tunnel login`, then `cloudflared tunnel create kobo-send` and `cloudflared tunnel route dns kobo-send kobo.yourdomain.com`.
-7. Copy `server/cloudflared-config.yml.example` to `~/.cloudflared/config.yml`, filling in your tunnel ID and hostname.
-8. Install `server/systemd/*.service` to `~/.config/systemd/user/`, then:
+5. Save your Anthropic API key: `umask 077; cat > ~/.config/kobo-send/anthropic-api-key` (paste the key, then Ctrl-D).
+6. Install `server/kobo-webhook.ts` to `~/.bin/kobo-webhook.ts`.
+7. `cloudflared tunnel login`, then `cloudflared tunnel create kobo-send` and `cloudflared tunnel route dns kobo-send kobo.yourdomain.com`.
+8. Copy `server/cloudflared-config.yml.example` to `~/.cloudflared/config.yml`, filling in your tunnel ID and hostname.
+9. Install `server/systemd/*.service` to `~/.config/systemd/user/`, then:
    ```
    sudo loginctl enable-linger $USER   # keep user services running without an active login session
    systemctl --user daemon-reload
