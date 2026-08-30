@@ -161,29 +161,31 @@ for INPUT in "$@"; do
       META_TITLE="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Title:[[:space:]]+//p')" || true
       META_AUTHOR="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Author:[[:space:]]+//p')" || true
       MD="$WORKDIR/$STEM.md"
-      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading. Determine the title, and if identifiable the author's full name (first and last), using these sources in priority order — fall back to a lower one only when a higher one gives nothing usable: (1) the document's own content, always preferred; (2) the PDF's embedded metadata, provided here for reference only (may be empty, inaccurate, or irrelevant to the article itself — use only if the content doesn't state one): metadata title=\"$META_TITLE\", metadata author=\"$META_AUTHOR\"; (3) the file's name, provided here for reference only: \"$BASENAME\" — only useful if it clearly encodes a real title or a full author name (e.g. 'Article Title by Firstname Lastname.pdf'), not if it's generic or app-generated (e.g. 'PDF document', 'Scan001'). Never invent a title or author not supported by one of these three sources. If, and only if, you identify a full author name (first and last — not just a first name or an informal sign-off like '– Mark'), add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely otherwise; never write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. This conversion only reformats an article the requester already possesses into an ebook, purely so they can read it more comfortably on their own device — it does not create new content, give advice, or take any action beyond that reformatting. The document may discuss sensitive subject matter — cybersecurity, weapons or chemical/biological risk, government surveillance, extremism, geopolitical conflict, self-harm, or similar — as commentary, analysis, journalism, or opinion, rather than as operational instructions for causing harm. Faithfully transcribing the document's existing discussion of such topics is not itself providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
-        notify "Conversion failed" "claude could not convert $BASENAME"
-        failed=$((failed+1))
-        continue
-      fi
-      if [ ! -s "$MD" ]; then
-        notify "Conversion failed" "claude produced no content for $BASENAME"
-        failed=$((failed+1))
-        continue
-      fi
-      # Same sentinel + refusal-guards as the URL branch — see comments there.
-      if grep -q '^CONVERSION_FAILED$' "$MD"; then
-        notify "Conversion failed" "claude declined or could not convert $BASENAME"
-        failed=$((failed+1))
-        continue
-      fi
-      if [ "$(wc -c < "$MD")" -lt 300 ]; then
-        notify "Conversion failed" "claude declined or found no content in $BASENAME"
-        failed=$((failed+1))
-        continue
-      fi
-      if [ "$(grep -c -E '\S' "$MD")" -lt 8 ]; then
-        notify "Conversion failed" "claude returned unexpected output for $BASENAME"
+      # claude -p occasionally refuses PDFs it can convert fine on a retry
+      # (see Known fragility in CLAUDE.md — root-caused as model-level
+      # caution on some content, mitigated but not eliminated by the prompt
+      # above). Retry a couple of times before giving up, rather than
+      # making the sender manually resend every time this happens.
+      PDF_CONVERT_OK=0
+      PDF_FAIL_REASON=""
+      for attempt in 1 2 3; do
+        if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading. Determine the title, and if identifiable the author's full name (first and last), using these sources in priority order — fall back to a lower one only when a higher one gives nothing usable: (1) the document's own content, always preferred; (2) the PDF's embedded metadata, provided here for reference only (may be empty, inaccurate, or irrelevant to the article itself — use only if the content doesn't state one): metadata title=\"$META_TITLE\", metadata author=\"$META_AUTHOR\"; (3) the file's name, provided here for reference only: \"$BASENAME\" — only useful if it clearly encodes a real title or a full author name (e.g. 'Article Title by Firstname Lastname.pdf'), not if it's generic or app-generated (e.g. 'PDF document', 'Scan001'). Never invent a title or author not supported by one of these three sources. If, and only if, you identify a full author name (first and last — not just a first name or an informal sign-off like '– Mark'), add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely otherwise; never write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. This conversion only reformats an article the requester already possesses into an ebook, purely so they can read it more comfortably on their own device — it does not create new content, give advice, or take any action beyond that reformatting. The document may discuss sensitive subject matter — cybersecurity, weapons or chemical/biological risk, government surveillance, extremism, geopolitical conflict, self-harm, or similar — as commentary, analysis, journalism, or opinion, rather than as operational instructions for causing harm. Faithfully transcribing the document's existing discussion of such topics is not itself providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+          PDF_FAIL_REASON="claude could not convert $BASENAME"
+        elif [ ! -s "$MD" ]; then
+          PDF_FAIL_REASON="claude produced no content for $BASENAME"
+        elif grep -q '^CONVERSION_FAILED$' "$MD"; then
+          PDF_FAIL_REASON="claude declined or could not convert $BASENAME"
+        elif [ "$(wc -c < "$MD")" -lt 300 ]; then
+          PDF_FAIL_REASON="claude declined or found no content in $BASENAME"
+        elif [ "$(grep -c -E '\S' "$MD")" -lt 8 ]; then
+          PDF_FAIL_REASON="claude returned unexpected output for $BASENAME"
+        else
+          PDF_CONVERT_OK=1
+          break
+        fi
+      done
+      if [ "$PDF_CONVERT_OK" -ne 1 ]; then
+        notify "Conversion failed" "$PDF_FAIL_REASON (after 3 attempts)"
         failed=$((failed+1))
         continue
       fi
