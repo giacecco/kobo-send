@@ -62,7 +62,7 @@ else
 fi
 
 # Verify tools exist up front with a clear message rather than a cryptic failure.
-for tool in pandoc kepubify rclone claude pdfinfo; do
+for tool in pandoc kepubify rclone claude pdfinfo pdftotext; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     notify "Missing tool" "$tool not found — run: brew install $tool"
     echo "ERROR: $tool not found on PATH" >&2
@@ -149,31 +149,63 @@ for INPUT in "$@"; do
   # --- Step 1: get an epub -------------------------------------------------
   case "$EXT_LC" in
     pdf)
-      # pandoc can't read PDF, so use claude -p to extract the content as
-      # Markdown first, then fall through the normal pandoc conversion.
-      # pdfinfo (fast, local, no AI needed) runs first so its Title/Author
-      # metadata — if any — can be handed to claude as reference context in
-      # the same call, alongside the filename, rather than making a second
-      # claude call afterwards to guess from the filename alone. claude
-      # judges title/author jointly across content, metadata, and filename
-      # in one pass, in that priority order.
+      # --- Step 1a: determine title/author from a small, cheap excerpt ---
+      # A dedicated, narrowly-scoped call, always on sonnet (not laddered
+      # like the content call below): a wrong-but-plausible title/author
+      # would sail straight past every guard downstream (they only catch
+      # refusals/emptiness, not inaccuracy) — confirmed in testing, where
+      # haiku picked a subheading ("The Path to a Positive AI Future")
+      # instead of the document's real title ("The Future is for
+      # Everyone"), which is exactly the kind of error nothing else here
+      # would catch. Cheap because it doesn't need to read the whole
+      # document: pdftotext extracts page 1 ourselves (no AI, no
+      # --allowedTools needed at all — the excerpt is embedded directly in
+      # a plain text prompt), capped to the first 20 lines so a dense or
+      # multi-column page 1 can't blow up the prompt regardless of how
+      # long the actual page is.
       PDF_META="$(pdfinfo "$INPUT" 2>/dev/null)" || true
       META_TITLE="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Title:[[:space:]]+//p')" || true
       META_AUTHOR="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Author:[[:space:]]+//p')" || true
+      PAGE1_SNIPPET="$(pdftotext -f 1 -l 1 -layout "$INPUT" - 2>/dev/null | head -n 20)" || true
+      TITLE_AUTHOR_RAW="$(claude --model sonnet -p "Here is the top of page 1 of a PDF document, extracted as plain text (layout may be imperfect, and it may include site navigation/boilerplate above the actual article start):
+---
+$PAGE1_SNIPPET
+---
+Using this excerpt as the primary source, and — only if the excerpt doesn't clearly show one — this PDF's own embedded metadata (title=\"$META_TITLE\", author=\"$META_AUTHOR\") and its filename (\"$BASENAME\", only useful if it clearly encodes a real title or a full author name, not if generic/app-generated like 'PDF document.pdf' or 'Scan001.pdf'), determine: (1) the document's real title — not a subheading or section title; if the excerpt shows a document title followed by a different subheading below it, prefer the document title — and (2) if identifiable, the author's full name (first and last, not just a first name or an informal sign-off). Never invent a title or author not supported by one of these three sources. Respond in exactly two lines and nothing else: 'TITLE: <title, or NONE if truly unclear>' then 'AUTHOR: <full name, or NONE if not a clear full name>'." 2>/dev/null)" || true
+      TITLE_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^TITLE:[[:space:]]+//p')" || true
+      [ "$TITLE_FINAL" = "NONE" ] && TITLE_FINAL=""
+      AUTHOR_FINAL="$(printf '%s\n' "$TITLE_AUTHOR_RAW" | sed -nE 's/^AUTHOR:[[:space:]]+//p')" || true
+      [ "$AUTHOR_FINAL" = "NONE" ] && AUTHOR_FINAL=""
+      [ "$(printf '%s' "$AUTHOR_FINAL" | wc -w)" -lt 2 ] && AUTHOR_FINAL=""
+      # Falls through to the filename-derived TITLE/STEM set earlier if the
+      # call above yielded nothing at all.
+      if [ -n "$TITLE_FINAL" ]; then
+        TITLE="$TITLE_FINAL"
+        STEM="$(printf '%s' "$TITLE_FINAL" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+        [ -z "$STEM" ] && STEM="file"
+      fi
+      AUTHOR="$AUTHOR_FINAL"
+
+      # --- Step 1b: convert the full document's body content -------------
+      # This call's only job is the body text — it's explicitly told not
+      # to produce a title heading or byline, since those are already
+      # settled above and get prepended afterwards regardless of which
+      # model tier ends up producing the body. Laddered haiku → sonnet →
+      # opus: haiku is far cheaper and likely sufficient for straight
+      # transcription, escalating only if it (or the next tier) fails —
+      # same refusal-flakiness rationale as before (see Known fragility in
+      # CLAUDE.md), now combined with a cost ladder instead of a flat
+      # sonnet/opus retry.
       MD="$WORKDIR/$STEM.md"
-      # claude -p occasionally refuses PDFs it can convert fine on a retry
-      # (see Known fragility in CLAUDE.md — root-caused as model-level
-      # caution on some content, mitigated but not eliminated by the prompt
-      # above). Try twice rather than making the sender manually resend:
-      # Sonnet first (cheap, and no --model flag previously meant this was
-      # silently running on Opus — the priciest tier — for every single
-      # conversion, which is wasteful for an article-conversion task), Opus
-      # only as the second-attempt fallback if Sonnet's attempt fails.
       PDF_CONVERT_OK=0
       PDF_FAIL_REASON=""
-      for attempt in 1 2; do
-        if [ "$attempt" -eq 1 ]; then MODEL="sonnet"; else MODEL="opus"; fi
-        if ! claude --model "$MODEL" --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading. Determine the title, and if identifiable the author's full name (first and last), using these sources in priority order — fall back to a lower one only when a higher one gives nothing usable: (1) the document's own content, always preferred; (2) the PDF's embedded metadata, provided here for reference only (may be empty, inaccurate, or irrelevant to the article itself — use only if the content doesn't state one): metadata title=\"$META_TITLE\", metadata author=\"$META_AUTHOR\"; (3) the file's name, provided here for reference only: \"$BASENAME\" — only useful if it clearly encodes a real title or a full author name (e.g. 'Article Title by Firstname Lastname.pdf'), not if it's generic or app-generated (e.g. 'PDF document', 'Scan001'). Never invent a title or author not supported by one of these three sources. If, and only if, you identify a full author name (first and last — not just a first name or an informal sign-off like '– Mark'), add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely otherwise; never write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. This conversion only reformats an article the requester already possesses into an ebook, purely so they can read it more comfortably on their own device — it does not create new content, give advice, or take any action beyond that reformatting. The document may discuss sensitive subject matter — cybersecurity, weapons or chemical/biological risk, government surveillance, extremism, geopolitical conflict, self-harm, or similar — as commentary, analysis, journalism, or opinion, rather than as operational instructions for causing harm. Faithfully transcribing the document's existing discussion of such topics is not itself providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+      for attempt in 1 2 3; do
+        case "$attempt" in
+          1) MODEL="haiku" ;;
+          2) MODEL="sonnet" ;;
+          *) MODEL="opus" ;;
+        esac
+        if ! claude --model "$MODEL" --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown body content. Do NOT include a top-level title heading or author byline — those have already been determined separately and will be added by the caller; start directly with the article's actual content. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. This conversion only reformats an article the requester already possesses into an ebook, purely so they can read it more comfortably on their own device — it does not create new content, give advice, or take any action beyond that reformatting. The document may discuss sensitive subject matter — cybersecurity, weapons or chemical/biological risk, government surveillance, extremism, geopolitical conflict, self-harm, or similar — as commentary, analysis, journalism, or opinion, rather than as operational instructions for causing harm. Faithfully transcribing the document's existing discussion of such topics is not itself providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble, no title heading." > "$MD" 2>"$WORKDIR/claude.err"; then
           PDF_FAIL_REASON="claude ($MODEL) could not convert $BASENAME"
         elif [ ! -s "$MD" ]; then
           PDF_FAIL_REASON="claude ($MODEL) produced no content for $BASENAME"
@@ -189,28 +221,25 @@ for INPUT in "$@"; do
         fi
       done
       if [ "$PDF_CONVERT_OK" -ne 1 ]; then
-        notify "Conversion failed" "$PDF_FAIL_REASON (tried sonnet then opus)"
+        notify "Conversion failed" "$PDF_FAIL_REASON (tried haiku, sonnet, opus)"
         failed=$((failed+1))
         continue
       fi
-      # claude already weighed content, metadata, and filename (in that
-      # priority order, per the prompt above) in a single pass — just pull
-      # its answer back out of the Markdown it produced. The word-count
-      # check on AUTHOR stays as a deterministic safety net regardless of
-      # what the prompt asked for; models don't always comply perfectly.
-      PDF_TITLE="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//')" || true
-      AUTHOR="$(grep -m2 -E '\S' "$MD" | tail -n1 | sed -nE 's/^[_*]*[Bb]y[[:space:]]+(.+[^_*[:space:]])[_*]*[[:space:]]*$/\1/p')" || true
-      [ "$(printf '%s' "$AUTHOR" | wc -w)" -lt 2 ] && AUTHOR=""
 
-      # Apply the final title (content/metadata/filename-guess, in that
-      # order) — TITLE stays unsanitized for display; STEM (filesystem-safe)
-      # is derived from it. Falls through to the filename-derived TITLE/STEM
-      # set earlier if nothing above yielded a title at all.
-      if [ -n "$PDF_TITLE" ]; then
-        TITLE="$PDF_TITLE"
-        STEM="$(printf '%s' "$PDF_TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
-        [ -z "$STEM" ] && STEM="file"
-      fi
+      # Prepend the trusted title/byline from Step 1a — guarantees the
+      # visible in-book heading always matches --metadata below, regardless
+      # of which model tier actually produced the body content.
+      {
+        echo "# $TITLE"
+        if [ -n "$AUTHOR" ]; then
+          echo
+          echo "_by ${AUTHOR}_"
+        fi
+        echo
+        cat "$MD"
+      } > "$MD.tmp"
+      mv "$MD.tmp" "$MD"
+
       EPUB="$WORKDIR/$STEM.epub"
       PANDOC_META=(--metadata title="$TITLE" --epub-title-page=false)
       [ -n "$AUTHOR" ] && PANDOC_META+=(--metadata author="$AUTHOR")
