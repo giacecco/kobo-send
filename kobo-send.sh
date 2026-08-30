@@ -263,6 +263,15 @@ for INPUT in "$@"; do
   if rclone copy "$KEPUB" "${GDRIVE_REMOTE}:" \
         --drive-root-folder-id "$GDRIVE_FOLDER_ID" 2>"$WORKDIR/rclone.err"; then
     sent=$((sent+1))
+    # rclone copy silently overwrites an existing file of the same name —
+    # so if two different inputs ever produce the same title (identical or
+    # near-identical articles, most likely), the later upload replaces the
+    # earlier one with no error from rclone or this script. There was no
+    # per-file record of what was actually uploaded until this line existed,
+    # which made a real occurrence of that (two sends, one file arriving)
+    # nearly undiagnosable after the fact — don't remove this without another
+    # way to audit collisions.
+    echo "Uploaded: $(basename "$KEPUB") (source: $BASENAME)" >&2
   else
     notify "Upload failed" "rclone could not upload $(basename "$KEPUB")"
     failed=$((failed+1))
