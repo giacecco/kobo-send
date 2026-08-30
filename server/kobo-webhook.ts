@@ -12,11 +12,13 @@ const TOKEN_FILE = join(process.env.HOME!, ".config/kobo-send/webhook-token");
 const SCRIPT = join(process.env.HOME!, ".bin/kobo-send.sh");
 const TOKEN = (await Bun.file(TOKEN_FILE).text()).trim();
 
-// Some Share Sheet sources (notably a Shortcut coercing a Safari web-page
-// item to text) hand over a URL with the whole thing duplicated across a
-// literal embedded newline, rather than just leading/trailing whitespace —
-// .trim() alone doesn't catch that, so validate shape after taking the
-// first line.
+// URL input (send a web page, not a file) isn't currently supported —
+// kobo-send.sh dropped that branch (unreliable claude -p WebFetch behaviour,
+// never confirmed fully working; see its git history to revive it). Some
+// Share Sheet sources (Reddit, LinkedIn, ...) hand off a shared link as a
+// "file" whose name — or whole content — is just the URL text; detect that
+// so it can be rejected with a clear error instead of uploading a "book"
+// named after a raw link.
 const URL_RE = /^https?:\/\/\S+$/;
 
 function timingSafeEqual(a: string, b: string): boolean {
@@ -59,13 +61,10 @@ Bun.serve({
     const contentType = req.headers.get("Content-Type") ?? "";
 
     if (contentType.startsWith("application/json")) {
-      const data = (await req.json().catch(() => ({}))) as { url?: string };
-      const url = (data.url ?? "").split(/\r?\n/)[0].trim();
-      if (!url || !URL_RE.test(url)) {
-        return new Response(JSON.stringify({ error: "missing or malformed url" }), { status: 400 });
-      }
-      runInBackground(url);
-      return new Response(JSON.stringify({ status: "queued", target: url }), { status: 202 });
+      return new Response(
+        JSON.stringify({ error: "URL input is not currently supported — send a file instead" }),
+        { status: 400 },
+      );
     }
 
     if (contentType.startsWith("multipart/form-data")) {
@@ -75,19 +74,19 @@ Bun.serve({
         return new Response(JSON.stringify({ error: "missing file" }), { status: 400 });
       }
 
-      // Some share extensions (Reddit, LinkedIn, ...) don't expose a proper
-      // URL type to Shortcuts, so a shared link arrives here as a "file"
-      // whose name — or whose entire content — is just the URL text. Detect
-      // that and route it through the real URL pipeline (title extraction,
-      // refusal-guard) instead of uploading a book named after a raw link.
-      let url: string | null = URL_RE.test(file.name) ? file.name : null;
-      if (!url && file.size < 2048) {
+      // A shared link disguised as a "file" (see the URL_RE comment above) —
+      // reject it rather than uploading a book named after a raw link, since
+      // there's no URL pipeline to route it through any more.
+      let looksLikeUrl = URL_RE.test(file.name);
+      if (!looksLikeUrl && file.size < 2048) {
         const text = (await file.text()).trim();
-        if (URL_RE.test(text)) url = text;
+        looksLikeUrl = URL_RE.test(text);
       }
-      if (url) {
-        runInBackground(url);
-        return new Response(JSON.stringify({ status: "queued", target: url }), { status: 202 });
+      if (looksLikeUrl) {
+        return new Response(
+          JSON.stringify({ error: "URL input is not currently supported — send a file instead" }),
+          { status: 400 },
+        );
       }
 
       const dir = await mkdtemp(join(tmpdir(), "kobo-webhook-"));

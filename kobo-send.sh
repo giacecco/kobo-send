@@ -3,11 +3,15 @@
 # that KoboCloud syncs to the Kobo Clara 2E.
 #
 # Pipeline:  input --(pandoc)--> epub --(kepubify)--> .kepub.epub --(rclone)--> Google Drive
-# Already-epub input skips pandoc. PDF input and http(s) URLs are first turned
-# into Markdown by `claude -p` (pandoc can read neither), then rejoin the
-# normal pandoc step. Accepts one or more files/URLs (loops over all).
+# Already-epub input skips pandoc. PDF input is first turned into Markdown by
+# `claude -p` (pandoc can't read PDF), then rejoins the normal pandoc step.
+# Accepts one or more files (loops over all).
 #
-# Usage:  kobo-send.sh /path/to/file.md [more files or URLs...]
+# URL input (send a web page, not a file) is NOT currently supported — it was
+# removed pending a rework of that branch (unreliable claude -p WebFetch
+# behaviour, never confirmed fully working). See git history if reviving it.
+#
+# Usage:  kobo-send.sh /path/to/file.md [more files...]
 
 set -euo pipefail
 
@@ -66,6 +70,16 @@ for tool in pandoc kepubify rclone claude; do
   fi
 done
 
+# The webhook can fire off several kobo-send.sh runs back to back (e.g. a
+# multi-file Share Sheet send), and a manual CLI run could overlap one of
+# those too. Serialize with a flock so only one conversion runs system-wide
+# at a time — concurrent claude -p / rclone / pandoc invocations queue up
+# and wait rather than racing each other. flock blocks until the lock is
+# free, so this doesn't fail an overlapping run, just delays it.
+LOCKFILE="${TMPDIR:-/tmp}/kobo-send.lock"
+exec 200>"$LOCKFILE"
+flock 200
+
 if [ "$#" -eq 0 ]; then
   notify "Nothing to do" "No file was passed in"
   exit 1
@@ -92,109 +106,53 @@ failed=0
 
 for INPUT in "$@"; do
   KEPUB=""
+  # Reset per-iteration — the pdf case below only conditionally sets this,
+  # and without a reset a byline found for one input could leak into the
+  # metadata of the next input that doesn't have one.
+  AUTHOR=""
+
+  # URL input isn't supported (see the file header) — reject it cleanly
+  # rather than trying to treat it as a filesystem path.
   if [[ "$INPUT" =~ ^https?:// ]]; then
-    IS_URL=1
-  else
-    IS_URL=0
-    if [ ! -f "$INPUT" ]; then
-      notify "Skipped" "Not a file: $(basename "$INPUT")"
-      failed=$((failed+1))
-      continue
-    fi
+    notify "Unsupported" "URL input is not supported: $INPUT"
+    failed=$((failed+1))
+    continue
+  fi
+  if [ ! -f "$INPUT" ]; then
+    notify "Skipped" "Not a file: $(basename "$INPUT")"
+    failed=$((failed+1))
+    continue
   fi
 
-  if [ "$IS_URL" -eq 1 ]; then
-    # --- Step 1 (URL): fetch the page and extract it as Markdown -----------
-    # pandoc has no web-page reader either, so use claude -p with WebFetch to
-    # pull the article text, stripped of ads/nav/boilerplate, as Markdown.
-    BASENAME="$INPUT"
-    MD="$(mktemp "$WORKDIR/webpage.XXXXXX.md")"
-    if ! claude --allowedTools "WebFetch" -p "Fetch the webpage at $INPUT and convert its main article content into clean Markdown, starting with a single top-level '# Title' heading taken from the page's actual title. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article's own content: adverts, subscription/paywall prompts, navigation links, cookie banners, related-article widgets, comment sections, and other boilerplate. This extraction is for the requester's own personal, offline reading on a device they own, of content they are already entitled to access (e.g. via an active subscription) — it is not for redistribution or republishing. That is legitimate personal format-shifting, comparable to a read-it-later service (Pocket, Instapaper) saving a paid article for its subscriber; do not decline on copyright grounds on that basis alone. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
-      notify "Fetch failed" "claude could not fetch $INPUT"
-      failed=$((failed+1))
-      continue
-    fi
-    if [ ! -s "$MD" ]; then
-      notify "Fetch failed" "claude produced no content for $INPUT"
-      failed=$((failed+1))
-      continue
-    fi
-    # claude sometimes refuses (e.g. over copyright concerns) and writes a
-    # short refusal sentence to $MD instead of erroring out — a real article
-    # is always far longer than that, so treat suspiciously short output as
-    # a failure rather than converting the refusal itself into a "book".
-    if [ "$(wc -c < "$MD")" -lt 300 ]; then
-      notify "Fetch failed" "claude declined or found no article at $INPUT"
-      failed=$((failed+1))
-      continue
-    fi
-    # A longer-but-still-not-real-output failure mode also happens: claude
-    # occasionally writes prose *about* a problem it hit (e.g. "I ran into a
-    # tooling constraint...") instead of the requested Markdown — long enough
-    # to slip past the byte-count guard above. A single apology paragraph is
-    # only a handful of lines; a real converted article always has many
-    # (headings, paragraph breaks, lists) — so require a minimum line count
-    # too, rather than requiring an exact heading format (unreliable — see
-    # comment below).
-    if [ "$(grep -c -E '\S' "$MD")" -lt 8 ]; then
-      notify "Fetch failed" "claude returned unexpected output for $INPUT"
-      failed=$((failed+1))
-      continue
-    fi
-    # claude's WebFetch output doesn't reliably start with an exact "# Title"
-    # heading, so take the first non-blank line and strip whatever markdown
-    # decoration it has (#, *, _) rather than requiring that exact format.
-    # The `|| true` matters: under set -e, grep finding no non-blank line at
-    # all would otherwise kill the whole script instead of falling through to
-    # the TITLE="webpage" default below.
-    # Keep an unsanitized TITLE separate from the filesystem-safe STEM below —
-    # STEM's tr pass turns any trailing punctuation (a colon, an em dash, a
-    # closing quote) into "_", and that mangling has no business leaking into
-    # the book's displayed title.
-    TITLE="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//')" || true
-    [ -z "$TITLE" ] && TITLE="webpage"
-    STEM="$(printf '%s' "$TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
-    [ -z "$STEM" ] && STEM="webpage"
-    EPUB="$WORKDIR/$STEM.epub"
-    if ! pandoc "$MD" -o "$EPUB" --metadata title="$TITLE" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
-      notify "Conversion failed" "pandoc could not convert $INPUT"
-      failed=$((failed+1))
-      continue
-    fi
-    EXT_LC=""
+  BASENAME="$(basename "$INPUT")"
+  # A .kepub.epub is already in its final form — and kepubify rejects it
+  # outright ('invalid extension ".kepub.epub"') — so it must bypass both
+  # conversion steps, not be fed back through them.
+  if [[ "$(printf '%s' "$BASENAME" | tr '[:upper:]' '[:lower:]')" == *.kepub.epub ]]; then
+    EXT_LC="kepub.epub"
+    TITLE="${BASENAME%.*.*}"
   else
-    BASENAME="$(basename "$INPUT")"
-    # A .kepub.epub is already in its final form — and kepubify rejects it
-    # outright ('invalid extension ".kepub.epub"') — so it must bypass both
-    # conversion steps, not be fed back through them.
-    if [[ "$(printf '%s' "$BASENAME" | tr '[:upper:]' '[:lower:]')" == *.kepub.epub ]]; then
-      EXT_LC="kepub.epub"
-      TITLE="${BASENAME%.*.*}"
-    else
-      EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
-      TITLE="${BASENAME%.*}"
-    fi
-    # Sanitize like the URL branch does — an input filename can come from
-    # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
-    # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
-    # STEM is for the filename only; TITLE (unsanitized) is for the book's
-    # displayed title — see the note in the URL branch above.
-    STEM="$(printf '%s' "$TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
-    [ -z "$STEM" ] && STEM="file"
-    [ -z "$TITLE" ] && TITLE="$STEM"
-    EPUB="$WORKDIR/$STEM.epub"
+    EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
+    TITLE="${BASENAME%.*}"
   fi
+  # Sanitize for use as a filename — an input filename can come from
+  # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
+  # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
+  # STEM is for the filename only; TITLE (unsanitized) is for the book's
+  # displayed title — tr's conversion of stray punctuation to "_" has no
+  # business leaking into that.
+  STEM="$(printf '%s' "$TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+  [ -z "$STEM" ] && STEM="file"
+  [ -z "$TITLE" ] && TITLE="$STEM"
+  EPUB="$WORKDIR/$STEM.epub"
 
   # --- Step 1: get an epub -------------------------------------------------
   case "$EXT_LC" in
-    "")
-      # URL input already produced $EPUB above; nothing more to do here.
-      ;;
     pdf)
       # pandoc can't read PDF, so use claude -p to extract the content as
       # Markdown first, then fall through the normal pandoc conversion.
       MD="$WORKDIR/$STEM.md"
-      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading taken from the document's actual title (not its filename). Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. Output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading taken from the document's actual title (not its filename). If the document states one or more author names, add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely if no author is stated in the document; never guess or write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
         notify "Conversion failed" "claude could not convert $BASENAME"
         failed=$((failed+1))
         continue
@@ -204,7 +162,12 @@ for INPUT in "$@"; do
         failed=$((failed+1))
         continue
       fi
-      # Same refusal-guards as the URL branch — see comments there.
+      # Same sentinel + refusal-guards as the URL branch — see comments there.
+      if grep -q '^CONVERSION_FAILED$' "$MD"; then
+        notify "Conversion failed" "claude declined or could not convert $BASENAME"
+        failed=$((failed+1))
+        continue
+      fi
       if [ "$(wc -c < "$MD")" -lt 300 ]; then
         notify "Conversion failed" "claude declined or found no content in $BASENAME"
         failed=$((failed+1))
@@ -228,8 +191,12 @@ for INPUT in "$@"; do
         STEM="$(printf '%s' "$PDF_TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
         [ -z "$STEM" ] && STEM="file"
       fi
+      # Same byline extraction as the URL branch — see comment there.
+      AUTHOR="$(grep -m2 -E '\S' "$MD" | tail -n1 | sed -nE 's/^[_*]*[Bb]y[[:space:]]+(.+[^_*[:space:]])[_*]*[[:space:]]*$/\1/p')" || true
       EPUB="$WORKDIR/$STEM.epub"
-      if ! pandoc "$MD" -o "$EPUB" --metadata title="$TITLE" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
+      PANDOC_META=(--metadata title="$TITLE" --epub-title-page=false)
+      [ -n "$AUTHOR" ] && PANDOC_META+=(--metadata author="$AUTHOR")
+      if ! pandoc "$MD" -o "$EPUB" "${PANDOC_META[@]}" 2>"$WORKDIR/pandoc.err"; then
         notify "Conversion failed" "pandoc could not convert $BASENAME"
         failed=$((failed+1))
         continue
