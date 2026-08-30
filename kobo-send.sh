@@ -117,16 +117,35 @@ for INPUT in "$@"; do
       failed=$((failed+1))
       continue
     fi
+    # A longer-but-still-not-real-output failure mode also happens: claude
+    # occasionally writes prose *about* a problem it hit (e.g. "I ran into a
+    # tooling constraint...") instead of the requested Markdown — long enough
+    # to slip past the byte-count guard above. A single apology paragraph is
+    # only a handful of lines; a real converted article always has many
+    # (headings, paragraph breaks, lists) — so require a minimum line count
+    # too, rather than requiring an exact heading format (unreliable — see
+    # comment below).
+    if [ "$(grep -c -E '\S' "$MD")" -lt 8 ]; then
+      notify "Fetch failed" "claude returned unexpected output for $INPUT"
+      failed=$((failed+1))
+      continue
+    fi
     # claude's WebFetch output doesn't reliably start with an exact "# Title"
     # heading, so take the first non-blank line and strip whatever markdown
     # decoration it has (#, *, _) rather than requiring that exact format.
     # The `|| true` matters: under set -e, grep finding no non-blank line at
     # all would otherwise kill the whole script instead of falling through to
-    # the STEM="webpage" default below.
-    STEM="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//' | tr -c '[:alnum:] ._-' '_' | cut -c1-80)" || true
+    # the TITLE="webpage" default below.
+    # Keep an unsanitized TITLE separate from the filesystem-safe STEM below —
+    # STEM's tr pass turns any trailing punctuation (a colon, an em dash, a
+    # closing quote) into "_", and that mangling has no business leaking into
+    # the book's displayed title.
+    TITLE="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//')" || true
+    [ -z "$TITLE" ] && TITLE="webpage"
+    STEM="$(printf '%s' "$TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
     [ -z "$STEM" ] && STEM="webpage"
     EPUB="$WORKDIR/$STEM.epub"
-    if ! pandoc "$MD" -o "$EPUB" --metadata title="$STEM" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
+    if ! pandoc "$MD" -o "$EPUB" --metadata title="$TITLE" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
       notify "Conversion failed" "pandoc could not convert $INPUT"
       failed=$((failed+1))
       continue
@@ -139,15 +158,19 @@ for INPUT in "$@"; do
     # conversion steps, not be fed back through them.
     if [[ "$(printf '%s' "$BASENAME" | tr '[:upper:]' '[:lower:]')" == *.kepub.epub ]]; then
       EXT_LC="kepub.epub"
-      STEM="$(printf '%s' "${BASENAME%.*.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+      TITLE="${BASENAME%.*.*}"
     else
       EXT_LC="$(printf '%s' "${BASENAME##*.}" | tr '[:upper:]' '[:lower:]')"
-      # Sanitize like the URL branch does — an input filename can come from
-      # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
-      # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
-      STEM="$(printf '%s' "${BASENAME%.*}" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+      TITLE="${BASENAME%.*}"
     fi
+    # Sanitize like the URL branch does — an input filename can come from
+    # anywhere (e.g. a Share Sheet turning a shared link into a "file" whose
+    # name is the raw URL), so don't trust it to be filesystem/Drive-friendly.
+    # STEM is for the filename only; TITLE (unsanitized) is for the book's
+    # displayed title — see the note in the URL branch above.
+    STEM="$(printf '%s' "$TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
     [ -z "$STEM" ] && STEM="file"
+    [ -z "$TITLE" ] && TITLE="$STEM"
     EPUB="$WORKDIR/$STEM.epub"
   fi
 
@@ -170,9 +193,14 @@ for INPUT in "$@"; do
         failed=$((failed+1))
         continue
       fi
-      # Same refusal-guard as the URL branch — see comment there.
+      # Same refusal-guards as the URL branch — see comments there.
       if [ "$(wc -c < "$MD")" -lt 300 ]; then
         notify "Conversion failed" "claude declined or found no content in $BASENAME"
+        failed=$((failed+1))
+        continue
+      fi
+      if [ "$(grep -c -E '\S' "$MD")" -lt 8 ]; then
+        notify "Conversion failed" "claude returned unexpected output for $BASENAME"
         failed=$((failed+1))
         continue
       fi
@@ -180,12 +208,17 @@ for INPUT in "$@"; do
       # exported by an app (e.g. macOS's generic "PDF document.pdf" from
       # Safari's Print > Save as PDF) often carry no meaningful filename at
       # all. Same first-non-blank-line extraction as the URL branch, falling
-      # back to the filename-derived STEM already set above if extraction
-      # yields nothing.
-      PDF_TITLE_STEM="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//' | tr -c '[:alnum:] ._-' '_' | cut -c1-80)" || true
-      [ -n "$PDF_TITLE_STEM" ] && STEM="$PDF_TITLE_STEM"
+      # back to the filename-derived TITLE/STEM already set above if
+      # extraction yields nothing. Keep TITLE unsanitized (see URL branch
+      # note above) — only STEM gets mangled for use as a filename.
+      PDF_TITLE="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//')" || true
+      if [ -n "$PDF_TITLE" ]; then
+        TITLE="$PDF_TITLE"
+        STEM="$(printf '%s' "$PDF_TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
+        [ -z "$STEM" ] && STEM="file"
+      fi
       EPUB="$WORKDIR/$STEM.epub"
-      if ! pandoc "$MD" -o "$EPUB" --metadata title="$STEM" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
+      if ! pandoc "$MD" -o "$EPUB" --metadata title="$TITLE" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
         notify "Conversion failed" "pandoc could not convert $BASENAME"
         failed=$((failed+1))
         continue
@@ -203,7 +236,7 @@ for INPUT in "$@"; do
     md|markdown|txt|html|htm|docx|rtf|fb2|org|tex|rst)
       # --metadata title gives the book a sensible title on the Kobo shelf;
       # --epub-title-page=false skips the standalone title-only front page.
-      if ! pandoc "$INPUT" -o "$EPUB" --metadata title="$STEM" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
+      if ! pandoc "$INPUT" -o "$EPUB" --metadata title="$TITLE" --epub-title-page=false 2>"$WORKDIR/pandoc.err"; then
         notify "Conversion failed" "pandoc could not convert $BASENAME"
         failed=$((failed+1))
         continue
