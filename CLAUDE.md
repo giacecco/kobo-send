@@ -53,3 +53,9 @@ rclone lsf kobocloud: --drive-root-folder-id <id>                       # confir
 ssh <server> 'journalctl --user -u kobo-webhook.service -n 50'          # check background job outcome
 ```
 After editing `kobo-send.sh` or `server/kobo-webhook.ts`, remember to deploy both to the server (`~/.bin/kobo-send.sh`, `~/.bin/kobo-webhook.ts`) — that's what's actually running, not this repo checkout. Restart the webhook after changing it: `systemctl --user restart kobo-webhook.service` on the server. After editing `kobo-send-client.sh`, deploy it to `~/.bin/kobo-send-client.sh` on the Mac — that's what the Mac Shortcuts' `Run Shell Script` actions invoke.
+
+**Deploy `kobo-send.sh` atomically — don't `scp` straight over the live file.** A plain `scp local ubuntu1.local:~/.bin/kobo-send.sh` overwrites in place, non-atomically; if the webhook happens to `exec` the script mid-write (a real collision, seen in practice — a queued job hit "syntax error near unexpected token" from reading a half-written file), that job crashes with no upload and no retry. `mv` on the same filesystem is atomic, so `scp` to a temp path on the server and `mv` into place instead:
+```
+scp kobo-send.sh ubuntu1.local:~/.bin/kobo-send.sh.new && \
+ssh ubuntu1.local 'chmod +x ~/.bin/kobo-send.sh.new && mv ~/.bin/kobo-send.sh.new ~/.bin/kobo-send.sh'
+```
