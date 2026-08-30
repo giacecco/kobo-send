@@ -62,7 +62,7 @@ else
 fi
 
 # Verify tools exist up front with a clear message rather than a cryptic failure.
-for tool in pandoc kepubify rclone claude; do
+for tool in pandoc kepubify rclone claude pdfinfo; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     notify "Missing tool" "$tool not found — run: brew install $tool"
     echo "ERROR: $tool not found on PATH" >&2
@@ -151,8 +151,17 @@ for INPUT in "$@"; do
     pdf)
       # pandoc can't read PDF, so use claude -p to extract the content as
       # Markdown first, then fall through the normal pandoc conversion.
+      # pdfinfo (fast, local, no AI needed) runs first so its Title/Author
+      # metadata — if any — can be handed to claude as reference context in
+      # the same call, alongside the filename, rather than making a second
+      # claude call afterwards to guess from the filename alone. claude
+      # judges title/author jointly across content, metadata, and filename
+      # in one pass, in that priority order.
+      PDF_META="$(pdfinfo "$INPUT" 2>/dev/null)" || true
+      META_TITLE="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Title:[[:space:]]+//p')" || true
+      META_AUTHOR="$(printf '%s\n' "$PDF_META" | sed -nE 's/^Author:[[:space:]]+//p')" || true
       MD="$WORKDIR/$STEM.md"
-      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading taken from the document's actual title (not its filename). If the document states one or more author names, add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely if no author is stated in the document; never guess or write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. The document may include commentary, analysis, or policy discussion of sensitive topics — cybersecurity, bioweapons or chemical/biological risk, government surveillance, geopolitical conflict, and similar — written from a journalistic, analytical, or opinion standpoint. Faithfully transcribing that discussion is not providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
+      if ! claude --allowedTools "Read" -p "Convert the PDF at $INPUT into clean Markdown, starting with a single top-level '# Title' heading. Determine the title, and if identifiable the author's full name (first and last), using these sources in priority order — fall back to a lower one only when a higher one gives nothing usable: (1) the document's own content, always preferred; (2) the PDF's embedded metadata, provided here for reference only (may be empty, inaccurate, or irrelevant to the article itself — use only if the content doesn't state one): metadata title=\"$META_TITLE\", metadata author=\"$META_AUTHOR\"; (3) the file's name, provided here for reference only: \"$BASENAME\" — only useful if it clearly encodes a real title or a full author name (e.g. 'Article Title by Firstname Lastname.pdf'), not if it's generic or app-generated (e.g. 'PDF document', 'Scan001'). Never invent a title or author not supported by one of these three sources. If, and only if, you identify a full author name (first and last — not just a first name or an informal sign-off like '– Mark'), add a single line immediately after the title heading, formatted exactly as '_by Author Name_' (or '_by Author One, Author Two_' for multiple authors) — omit this line entirely otherwise; never write 'Unknown'. Preserve headings, paragraphs, and lists faithfully. Strip anything that isn't the article/document's own content: adverts, subscription/paywall prompts, navigation links, page headers and footers, page numbers, and repeated boilerplate. This conversion is for the requester's own personal, offline reading on a device they own, of a document they already possess — it is not for redistribution or republishing. This conversion only reformats an article the requester already possesses into an ebook, purely so they can read it more comfortably on their own device — it does not create new content, give advice, or take any action beyond that reformatting. The document may discuss sensitive subject matter — cybersecurity, weapons or chemical/biological risk, government surveillance, extremism, geopolitical conflict, self-harm, or similar — as commentary, analysis, journalism, or opinion, rather than as operational instructions for causing harm. Faithfully transcribing the document's existing discussion of such topics is not itself providing instructions, advocacy, or assistance with anything harmful, and is not a reason to shorten, omit, or decline the conversion. If you are unable to read or convert the document for any reason — blocked, unreadable, no extractable content, or anything else — do not explain why and do not output partial or invented content: output only the exact single line CONVERSION_FAILED and nothing else. Otherwise output ONLY the Markdown content — no commentary, no code fences, no preamble." > "$MD" 2>"$WORKDIR/claude.err"; then
         notify "Conversion failed" "claude could not convert $BASENAME"
         failed=$((failed+1))
         continue
@@ -178,21 +187,24 @@ for INPUT in "$@"; do
         failed=$((failed+1))
         continue
       fi
-      # Prefer the document's own title over the input filename — PDFs
-      # exported by an app (e.g. macOS's generic "PDF document.pdf" from
-      # Safari's Print > Save as PDF) often carry no meaningful filename at
-      # all. Same first-non-blank-line extraction as the URL branch, falling
-      # back to the filename-derived TITLE/STEM already set above if
-      # extraction yields nothing. Keep TITLE unsanitized (see URL branch
-      # note above) — only STEM gets mangled for use as a filename.
+      # claude already weighed content, metadata, and filename (in that
+      # priority order, per the prompt above) in a single pass — just pull
+      # its answer back out of the Markdown it produced. The word-count
+      # check on AUTHOR stays as a deterministic safety net regardless of
+      # what the prompt asked for; models don't always comply perfectly.
       PDF_TITLE="$(grep -m1 -E '\S' "$MD" | sed -E 's/^[#*_ ]+//; s/[#*_ ]+$//')" || true
+      AUTHOR="$(grep -m2 -E '\S' "$MD" | tail -n1 | sed -nE 's/^[_*]*[Bb]y[[:space:]]+(.+[^_*[:space:]])[_*]*[[:space:]]*$/\1/p')" || true
+      [ "$(printf '%s' "$AUTHOR" | wc -w)" -lt 2 ] && AUTHOR=""
+
+      # Apply the final title (content/metadata/filename-guess, in that
+      # order) — TITLE stays unsanitized for display; STEM (filesystem-safe)
+      # is derived from it. Falls through to the filename-derived TITLE/STEM
+      # set earlier if nothing above yielded a title at all.
       if [ -n "$PDF_TITLE" ]; then
         TITLE="$PDF_TITLE"
         STEM="$(printf '%s' "$PDF_TITLE" | tr -c '[:alnum:] ._-' '_' | cut -c1-80)"
         [ -z "$STEM" ] && STEM="file"
       fi
-      # Same byline extraction as the URL branch — see comment there.
-      AUTHOR="$(grep -m2 -E '\S' "$MD" | tail -n1 | sed -nE 's/^[_*]*[Bb]y[[:space:]]+(.+[^_*[:space:]])[_*]*[[:space:]]*$/\1/p')" || true
       EPUB="$WORKDIR/$STEM.epub"
       PANDOC_META=(--metadata title="$TITLE" --epub-title-page=false)
       [ -n "$AUTHOR" ] && PANDOC_META+=(--metadata author="$AUTHOR")

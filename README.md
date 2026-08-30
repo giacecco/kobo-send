@@ -20,7 +20,8 @@ Inside `kobo-send.sh`:
 
 - Markdown, plain text, HTML, DOCX, RTF, FB2, org, LaTeX and reStructuredText are converted to EPUB by [pandoc](https://pandoc.org).
 - EPUB input is used as-is.
-- PDF input can't be read by pandoc, so it's first turned into clean Markdown by `claude -p` (the [Claude Code](https://claude.com/claude-code) CLI), stripping ads, navigation, page headers/footers, and other boilerplate along the way, and pulling out the document's real title and author (not the filename) — then the result rejoins the normal pandoc step. If `claude` declines or fails to extract something, or a share extension hands off a raw URL disguised as a "file" (common with Reddit, LinkedIn, etc.), the webhook and script both detect and reject it rather than uploading a garbage or misnamed book.
+- PDF input can't be read by pandoc, so it's first turned into clean Markdown by `claude -p` (the [Claude Code](https://claude.com/claude-code) CLI), stripping ads, navigation, page headers/footers, and other boilerplate along the way, and pulling out the document's real title (not the filename) — then the result rejoins the normal pandoc step. If `claude` declines or fails to extract something, or a share extension hands off a raw URL disguised as a "file" (common with Reddit, LinkedIn, etc.), the webhook and script both detect and reject it rather than uploading a garbage or misnamed book.
+- Author metadata, when available, is tried from three sources in order — the document's own text (a byline claude was asked to extract), the PDF's embedded Author property (via `pdfinfo`), then the filename — using the first one that's a full name (first and last); a bare first name from an informal sign-off isn't accepted, and none of the sources are guessed.
 - [kepubify](https://github.com/pgaskin/kepubify) converts the EPUB into Kobo's `.kepub.epub` format for reading-stats/page-turn support.
 - [rclone](https://rclone.org) uploads the result to a specific Google Drive folder.
 - Before each send, files older than a configurable age are purged from that Drive folder — KoboCloud has no "delete after sync" feature of its own, and there's no way to confirm from the client side that the Kobo has actually pulled a given file, so this is a time-based approximation.
@@ -32,7 +33,7 @@ The webhook queues the job and returns immediately (HTTP 202) — Cloudflare's e
 
 **On the server** (anything always-on and reachable — a Linux box, in this setup):
 ```
-sudo apt install pandoc rclone                                     # or: brew install pandoc rclone
+sudo apt install pandoc rclone poppler-utils                       # or: brew install pandoc rclone poppler
 mkdir -p ~/.bin
 curl -fsSL -o ~/.bin/kepubify https://github.com/pgaskin/kepubify/releases/latest/download/kepubify-linux-64bit
 curl -fsSL -o ~/.bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
